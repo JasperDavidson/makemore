@@ -19,20 +19,25 @@ def main():
 
     normalized_char_probs = torch.nn.functional.normalize(char_probs, p=1, dim=1)
 
-    new_word = ""
-    prev_char = "."
+    new_word = []
+    prev_char_idx = 0
+    word_gen = torch.Generator()
+    word_gen.manual_seed(42)
+
     while True:
-        next_char_idx = int(
-            torch.multinomial(normalized_char_probs[stoi[prev_char]], 1).item()
+        prev_char_idx = int(
+            torch.multinomial(
+                normalized_char_probs[prev_char_idx], 1, generator=word_gen
+            ).item()
         )
-        prev_char = itos[next_char_idx]
+        prev_char = itos[prev_char_idx]
 
         if prev_char == ".":
             break
 
-        new_word += prev_char
+        new_word.append(prev_char)
 
-    print("Generated: ", new_word)
+    print("Generated: ", "".join(new_word))
 
 
 if __name__ == "__main__":
