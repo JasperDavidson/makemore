@@ -1,0 +1,4 @@
+.python-version
+pyproject.toml
+pyrightconfig.json
+uv.lock
