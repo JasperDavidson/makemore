@@ -55,15 +55,15 @@ def stat_bigram(words: list[str], stoi: dict[str, int], itos: dict[int, str]):
     print("Generated: ", "".join(new_word))
 
 
-def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
+def train(words: list[str], stoi: dict[str, int]):
     # Hyperparameters
-    learning_rate = 0.5
+    learning_rate = 0.1
 
     # Create the input->target pair tensors
     input: list[int] = []
     target: list[int] = []
 
-    for word in words:
+    for word in words[:1]:
         chrs = ["."] + list(word) + ["."]
         for ch1, ch2 in zip(chrs, chrs[1:]):
             ch1_num = stoi[ch1]
@@ -73,49 +73,26 @@ def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
             target.append(ch2_num)
 
     input_tensor = torch.tensor(input)
+    target_tensor = torch.tensor(target)
 
+    # Compute the first (and currently only) nn layer
+    # n x 27 dot 27 x 27 (27 neurons) = n x 27
     one_hot_in = torch.nn.functional.one_hot(input_tensor, num_classes=27).float()
-    weights = torch.randn(27, 27, requires_grad=True)
-    loss = torch.inf
-    while loss > 3:
-        # Compute the first (and currently only) nn layer
-        # n x 27 dot 27 x 27 (27 neurons) = n x 27
-        out = one_hot_in @ weights
+    weights = torch.randn(27, 27)
+    out = one_hot_in @ weights
 
-        # Compute softmax to get the probabilities
-        prob = torch.nn.functional.softmax(out, dim=-1)
+    # Compute softmax to get the probabilities
+    prob = torch.nn.functional.softmax(out, dim=-1)
 
-        # Compute the neg. log likelihood of the model output
-        loss = -prob[torch.arange(len(target)), target].log().mean()
+    # Compute the neg. log likelihood of the model output
+    loss = -prob[torch.arange(5), target_tensor].log().mean()
 
-        # Backward pass (gradient descent)
-        weights.grad = None
-        loss.backward()
-        assert weights.grad is not None
-        weights.data += -learning_rate * weights.grad
+    # Backward pass (gradient descent)
+    weights.grad = None
+    loss.backward()
+    weights.data += learning_rate * -weights.grad
 
-        print("Log likelihood loss: ", loss.data)
-
-    return weights
-
-
-def infer_word(
-    word_len: int, weights: torch.Tensor, stoi: dict[str, int], itos: dict[int, str]
-):
-    init_char = torch.tensor(stoi["."])
-    one_hot = torch.nn.functional.one_hot(init_char, num_classes=27).float()
-    out_word = ""
-    for _ in range(word_len):
-        out = one_hot @ weights
-        prob = torch.nn.functional.softmax(out, dim=-1)
-
-        out_char = int(torch.multinomial(prob, 1).item())
-        one_hot = torch.nn.functional.one_hot(
-            torch.tensor(out_char), num_classes=27
-        ).float()
-        out_word += itos[out_char]
-
-    print(out_word)
+    print("Log likelihood of random nn layer: ", loss)
 
 
 def main():
@@ -128,8 +105,7 @@ def main():
     itos = {i: s for i, s in enumerate(chars)}
 
     # stat_bigram(words, stoi, itos)
-    weights = train(words, stoi)
-    infer_word(6, weights, stoi, itos)
+    train(words, stoi)
 
 
 if __name__ == "__main__":
