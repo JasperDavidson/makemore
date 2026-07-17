@@ -100,19 +100,22 @@ def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
 
 
 def infer_word(
-    max_len: int, weights: torch.Tensor, stoi: dict[str, int], itos: dict[int, str]
+    word_len: int, weights: torch.Tensor, stoi: dict[str, int], itos: dict[int, str]
 ):
-    init_char = torch.tensor(stoi["."])
-    one_hot = torch.nn.functional.one_hot(init_char, num_classes=27).float()
+    out_char = stoi["."]
+    one_hot = torch.nn.functional.one_hot(
+        torch.tensor(out_char), num_classes=27
+    ).float()
     out_word = ""
-    for _ in range(max_len):
-        out = one_hot @ weights
-        prob = torch.nn.functional.softmax(out, dim=-1)
+    for _ in range(word_len):
+        while True:
+            out = one_hot @ weights
+            prob = torch.nn.functional.softmax(out, dim=-1)
 
-        out_char = int(torch.multinomial(prob, 1).item())
-        if out_char == 0:
-            print(out_word)
-            return
+            out_char = int(torch.multinomial(prob, 1).item())
+
+            if out_char != 0:
+                break
 
         one_hot = torch.nn.functional.one_hot(
             torch.tensor(out_char), num_classes=27
