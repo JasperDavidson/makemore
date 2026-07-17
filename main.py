@@ -57,7 +57,7 @@ def stat_bigram(words: list[str], stoi: dict[str, int], itos: dict[int, str]):
 
 def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
     # Hyperparameters
-    learning_rate = 0.5
+    learning_rate = 10
 
     # Create the input->target pair tensors
     input: list[int] = []
@@ -77,7 +77,7 @@ def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
     one_hot_in = torch.nn.functional.one_hot(input_tensor, num_classes=27).float()
     weights = torch.randn(27, 27, requires_grad=True)
     loss = torch.inf
-    while loss > 3:
+    while loss > 2.5:
         # Compute the first (and currently only) nn layer
         # n x 27 dot 27 x 27 (27 neurons) = n x 27
         out = one_hot_in @ weights
@@ -100,16 +100,20 @@ def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
 
 
 def infer_word(
-    word_len: int, weights: torch.Tensor, stoi: dict[str, int], itos: dict[int, str]
+    max_len: int, weights: torch.Tensor, stoi: dict[str, int], itos: dict[int, str]
 ):
     init_char = torch.tensor(stoi["."])
     one_hot = torch.nn.functional.one_hot(init_char, num_classes=27).float()
     out_word = ""
-    for _ in range(word_len):
+    for _ in range(max_len):
         out = one_hot @ weights
         prob = torch.nn.functional.softmax(out, dim=-1)
 
         out_char = int(torch.multinomial(prob, 1).item())
+        if out_char == 0:
+            print(out_word)
+            return
+
         one_hot = torch.nn.functional.one_hot(
             torch.tensor(out_char), num_classes=27
         ).float()
