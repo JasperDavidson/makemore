@@ -2,3 +2,4 @@
 pyproject.toml
 pyrightconfig.json
 uv.lock
+__pycache__/

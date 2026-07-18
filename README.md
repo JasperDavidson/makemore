@@ -1,4 +1,4 @@
-My implementation of Makemore, following the wonderful Andrej Karpathy series "Zero to Hero" (https://karpathy.ai/zero-to-hero.html)
+My implementation of Makemore, following the Andrej Karpathy series "Zero to Hero" (https://karpathy.ai/zero-to-hero.html)
 
 ## Part 1
 This part contains two models that learn from the same probability distribution; they learn to predict the next character given the current character (a *bigram* model).
