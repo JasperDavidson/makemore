@@ -86,7 +86,9 @@ def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
         prob = torch.nn.functional.softmax(out, dim=-1)
 
         # Compute the neg. log likelihood of the model output
-        loss = -prob[torch.arange(len(target)), target].log().mean()
+        regularization_loss = (weights**2).mean()
+        data_loss = -prob[torch.arange(len(target)), target].log().mean()
+        loss = data_loss + 0.01 * regularization_loss
 
         # Backward pass (gradient descent)
         weights.grad = None
@@ -94,7 +96,7 @@ def train(words: list[str], stoi: dict[str, int]) -> torch.Tensor:
         assert weights.grad is not None
         weights.data += -learning_rate * weights.grad
 
-        print("Log likelihood loss: ", loss.data)
+        print("Total loss: ", loss.data)
 
     return weights
 
