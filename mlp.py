@@ -23,3 +23,7 @@ def train_mlp():
 
     training = torch.tensor(training)
     validation = torch.tensor(validation)
+    embedding_space = torch.randn(
+        27, 2
+    )  # Randomly initialize the embeddings, learned via gradient optimization
+    cur_embeddings = embedding_space[training]
