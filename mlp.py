@@ -7,6 +7,7 @@ block_size = 3
 embedding_dims = 2
 num_training_iter = 10000
 reg_loss_param = 0.1
+minibatch_size = 32
 
 l1_size = 100
 l_out_size = 27  # Matches number of character options
@@ -29,7 +30,11 @@ def forward_pass(training: torch.Tensor, validation: torch.Tensor, train_iter: i
     for p in parameters:
         p.requires_grad = True
 
-    for cur_iter in range(train_iter):
+    data_loss = 0
+    reg_loss = 0
+    loss = 0
+
+    def compute_overall_loss() -> list[torch.Tensor]:
         cur_embeddings = embedding_space[training]
 
         # Perform layer one calculation
@@ -40,11 +45,25 @@ def forward_pass(training: torch.Tensor, validation: torch.Tensor, train_iter: i
         # Compute the output and loss
         logits = l1_out @ w_out + b_out
         data_loss = torch.nn.functional.cross_entropy(logits, validation)
-        reg_loss = (w1**2).sum().mean() + (w_out**2).sum().mean()
+        reg_loss = (w1**2).mean() + (w_out**2).mean()
         loss = data_loss + reg_loss_param * reg_loss
-        print(f"Data loss @ {cur_iter} = {data_loss}")
-        print(f"Reg loss @ {cur_iter} = {reg_loss}")
-        print(f"Loss @ {cur_iter} = {loss}")
+
+        return [loss, data_loss, reg_loss]
+
+    for next_train_cap in range(train_iter):
+        minibatch_idx = torch.randint(0, training.shape[0], (minibatch_size,))
+        cur_embeddings = embedding_space[training[minibatch_idx]]
+
+        # Perform layer one calculation
+        # - Note that we resize to (-1, 6) in order to pass all block_size * embedding_dims vals to the first layer
+        # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
+        l1_out = torch.tanh(cur_embeddings.view(-1, 6) @ w1 + b1)
+
+        # Compute the output and loss
+        logits = l1_out @ w_out + b_out
+        data_loss = torch.nn.functional.cross_entropy(logits, validation[minibatch_idx])
+        reg_loss = (w1**2).mean() + (w_out**2).mean()
+        loss = data_loss + reg_loss_param * reg_loss
 
         for p in parameters:
             p.grad = None
@@ -53,6 +72,12 @@ def forward_pass(training: torch.Tensor, validation: torch.Tensor, train_iter: i
         for p in parameters:
             assert p.grad is not None
             p.data += -lr * p.grad
+
+        if next_train_cap % (train_iter / 10) == 0:
+            overall_loss = compute_overall_loss()
+            print(f"Loss @ {next_train_cap} = {overall_loss[0].data}")
+            print(f"Data loss @ {next_train_cap} = {overall_loss[1].data}")
+            print(f"Reg loss @ {next_train_cap} = {overall_loss[2].data}")
 
 
 def train_mlp():
