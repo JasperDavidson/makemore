@@ -34,6 +34,8 @@ def forward_pass(training: torch.Tensor, validation: torch.Tensor, train_iter: i
     reg_loss = 0
     loss = 0
 
+    # Compute overall loss after many minibatches to keep track of progress/find loss at the end
+    # Also used for learning rate optimization
     def compute_overall_loss() -> list[torch.Tensor]:
         cur_embeddings = embedding_space[training]
 
@@ -50,7 +52,7 @@ def forward_pass(training: torch.Tensor, validation: torch.Tensor, train_iter: i
 
         return [loss, data_loss, reg_loss]
 
-    for next_train_cap in range(train_iter):
+    def compute_minibatch_loss() -> list[torch.Tensor]:
         minibatch_idx = torch.randint(0, training.shape[0], (minibatch_size,))
         cur_embeddings = embedding_space[training[minibatch_idx]]
 
@@ -64,6 +66,32 @@ def forward_pass(training: torch.Tensor, validation: torch.Tensor, train_iter: i
         data_loss = torch.nn.functional.cross_entropy(logits, validation[minibatch_idx])
         reg_loss = (w1**2).mean() + (w_out**2).mean()
         loss = data_loss + reg_loss_param * reg_loss
+
+        return [loss, data_loss, reg_loss]
+
+    lre = torch.linspace(-3, 0, 1000)
+    lrs = 10**lre
+    lr_loss = []
+
+    for i in range(1000):
+        lr = lrs[i]
+        loss = compute_minibatch_loss()[0]
+        lr_loss.append(loss.item())
+
+        for p in parameters:
+            p.grad = None
+        loss.backward()
+
+        for p in parameters:
+            assert p.grad is not None
+            p.data += -lr * p.grad
+
+    min_loss_idx = lr_loss.index(min(lr_loss))
+    lr = lrs[min_loss_idx]
+    print(f"Optimized learning rate = {lr}")
+
+    for next_train_cap in range(train_iter):
+        loss = compute_minibatch_loss()[0]
 
         for p in parameters:
             p.grad = None
