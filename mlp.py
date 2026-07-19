@@ -4,8 +4,8 @@ import random
 
 # Hyperparameters
 block_size = 3
-embedding_dims = 3
-num_training_iter = 50000
+embedding_dims = 10
+num_training_iter = 100000
 reg_loss_param = 0.01
 minibatch_size = 100
 
@@ -50,32 +50,16 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     for p in parameters:
         p.requires_grad = True
 
-    def compute_minibatch_loss() -> list[torch.Tensor]:
-        minibatch_idx = torch.randint(0, x.shape[0], (minibatch_size,))
-        cur_embeddings = embedding_space[x[minibatch_idx]]
-
-        # Perform layer one calculation
-        # - Note that we resize to (-1, block_size * embedding_dims) in order to pass all block_size * embedding_dims vals to the first layer
-        # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
-        l1_out = torch.tanh(
-            cur_embeddings.view(-1, block_size * embedding_dims) @ w1 + b1
-        )
-
-        # Compute the output and loss
-        logits = l1_out @ w_out + b_out
-        data_loss = torch.nn.functional.cross_entropy(logits, y[minibatch_idx])
-        reg_loss = (w1**2).mean() + (w_out**2).mean()
-        loss = data_loss + reg_loss_param * reg_loss
-
-        return [loss, data_loss, reg_loss]
-
+    # Ad hoc pre-training lr optimization
     lre = torch.linspace(-3, 0, 1000)
     lrs = 10**lre
     lr_loss = []
 
     for i in range(1000):
         lr = lrs[i]
-        loss = compute_minibatch_loss()[0]
+        loss = compute_minibatch_loss(
+            minibatch_size, x, y, embedding_space, w1, b1, w_out, b_out
+        )[0]
         lr_loss.append(loss.item())
 
         for p in parameters:
@@ -90,8 +74,10 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     optimized_lr = lrs[min_loss_idx]
 
     for next_train_cap in range(train_iter):
-        lr = optimized_lr / 10 if next_train_cap > train_iter * 0.75 else optimized_lr
-        loss = compute_minibatch_loss()[0]
+        lr = optimized_lr / 100 if next_train_cap > train_iter * 0.75 else optimized_lr
+        loss = compute_minibatch_loss(
+            minibatch_size, x, y, embedding_space, w1, b1, w_out, b_out
+        )[0]
 
         for p in parameters:
             p.grad = None
@@ -131,6 +117,33 @@ def compute_overall_loss(
     # Compute the output and loss
     logits = l1_out @ w_out + b_out
     data_loss = torch.nn.functional.cross_entropy(logits, y)
+    reg_loss = (w1**2).mean() + (w_out**2).mean()
+    loss = data_loss + reg_loss_param * reg_loss
+
+    return [loss, data_loss, reg_loss]
+
+
+def compute_minibatch_loss(
+    batch_size: int,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    embedding_space: torch.Tensor,
+    w1: torch.Tensor,
+    b1: torch.Tensor,
+    w_out: torch.Tensor,
+    b_out: torch.Tensor,
+) -> list[torch.Tensor]:
+    minibatch_idx = torch.randint(0, x.shape[0], (batch_size,))
+    cur_embeddings = embedding_space[x[minibatch_idx]]
+
+    # Perform layer one calculation
+    # - Note that we resize to (-1, block_size * embedding_dims) in order to pass all block_size * embedding_dims vals to the first layer
+    # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
+    l1_out = torch.tanh(cur_embeddings.view(-1, block_size * embedding_dims) @ w1 + b1)
+
+    # Compute the output and loss
+    logits = l1_out @ w_out + b_out
+    data_loss = torch.nn.functional.cross_entropy(logits, y[minibatch_idx])
     reg_loss = (w1**2).mean() + (w_out**2).mean()
     loss = data_loss + reg_loss_param * reg_loss
 
