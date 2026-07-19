@@ -1,5 +1,5 @@
 import torch
-from helpers import find_mappings
+from helpers import find_mappings, create_data_splits
 import random
 
 # Hyperparameters
@@ -13,38 +13,20 @@ l1_size = 300
 l_out_size = 27  # Matches number of character options
 
 
-def create_data_splits(
-    words: list[str], stoi: dict[str, int]
-) -> tuple[torch.Tensor, torch.Tensor]:
-    training, validation = [], []
-
-    for word in words:
-        context = [0] * block_size
-
-        for ch in word + ".":
-            ch_val = stoi[ch]
-            training.append(context)
-            validation.append(ch_val)
-            context = context[1:] + [ch_val]
-
-    training = torch.tensor(training)
-    validation = torch.tensor(validation)
-
-    return (training, validation)
-
-
 def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.Tensor]:
     embedding_space = torch.randn(
         27, embedding_dims
     )  # Randomly initialize the embeddings, learned via gradient optimization
 
     # Layer One
-    w1 = torch.randn(block_size * embedding_dims, l1_size)
-    b1 = torch.randn(l1_size)
+    w1 = torch.empty(block_size * embedding_dims, l1_size)
+    torch.nn.init.kaiming_normal_(w1, mode="fan_in", nonlinearity="tanh")
+    b1 = torch.randn(l1_size) * 0.01
 
     # Output layer
-    w_out = torch.randn(l1_size, l_out_size)
-    b_out = torch.randn(l_out_size)
+    # Make weights smaller as to prevent initial overconfidence
+    w_out = torch.randn(l1_size, l_out_size) * 0.01
+    b_out = torch.zeros(l_out_size) * 0
 
     parameters = [embedding_space, w1, b1, w_out, b_out]
     for p in parameters:
@@ -73,6 +55,7 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     min_loss_idx = lr_loss.index(min(lr_loss))
     optimized_lr = lrs[min_loss_idx]
 
+    # Perform the training forward and backward passes
     for next_train_cap in range(train_iter):
         lr = optimized_lr / 100 if next_train_cap > train_iter * 0.75 else optimized_lr
         loss = compute_minibatch_loss(
@@ -97,7 +80,8 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     return [embedding_space, w1, b1, w_out, b_out]
 
 
-# Compute overall loss after many minibatches to keep track of progress/find loss at the end
+# Compute overall loss for validation/testing
+@torch.no_grad()
 def compute_overall_loss(
     x: torch.Tensor,
     y: torch.Tensor,
@@ -150,6 +134,46 @@ def compute_minibatch_loss(
     return [loss, data_loss, reg_loss]
 
 
+@torch.no_grad()
+def infer(
+    num_words: int,
+    itos: dict[int, str],
+    embedding_space: torch.Tensor,
+    w1: torch.Tensor,
+    b1: torch.Tensor,
+    w_out: torch.Tensor,
+    b_out: torch.Tensor,
+) -> list[str]:
+    predictions = [""] * num_words
+    for i in range(num_words):
+        context = torch.tensor([0] * block_size)
+        cur_char = 0
+
+        while True:
+            predictions[i] += itos[cur_char]
+
+            # Compute the forward pass and find the probabilities
+            cur_embeddings = embedding_space[context]
+
+            hidden_out = torch.tanh(
+                cur_embeddings.view(-1, block_size * embedding_dims) @ w1 + b1
+            )
+
+            logits = hidden_out @ w_out + b_out
+            prob = torch.softmax(logits, dim=1)
+
+            # Sample to find the next char and update context
+            cur_char = int(torch.multinomial(prob, 1).item())
+            if cur_char == 0:
+                break
+
+            context = torch.cat((context[1:], torch.tensor([cur_char])))
+
+        predictions[i] = predictions[i][1:]
+
+    return predictions
+
+
 def train_call():
     # Word dataset to train off of
     words = open("names.txt", "r").read().splitlines()
@@ -162,9 +186,9 @@ def train_call():
     val_split = int(len(words) * 0.9)
     test_split = len(words)
 
-    x_train, y_train = create_data_splits(words[0:train_split], stoi)
-    x_val, y_val = create_data_splits(words[0:val_split], stoi)
-    x_test, y_test = create_data_splits(words[0:test_split], stoi)
+    x_train, y_train = create_data_splits(words[0:train_split], stoi, block_size)
+    x_val, y_val = create_data_splits(words[0:val_split], stoi, block_size)
+    x_test, y_test = create_data_splits(words[0:test_split], stoi, block_size)
 
     embedding_space, w1, b1, w_out, b_out = train_mlp(
         x_train, y_train, num_training_iter
@@ -176,3 +200,8 @@ def train_call():
     print(f"\nVal loss = {val_loss.item()}")
     print(f"Val data loss = {val_data_loss.item()}")
     print(f"Val reg loss = {val_reg_loss.item()}")
+
+    predictions = infer(10, itos, embedding_space, w1, b1, w_out, b_out)
+    print("\nPredictions:")
+    for prediction in predictions:
+        print(prediction)
