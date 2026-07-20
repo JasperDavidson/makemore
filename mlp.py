@@ -12,6 +12,10 @@ minibatch_size = 100
 l1_size = 300
 l_out_size = 27  # Matches number of character options
 
+# Learned parameters
+running_mean = torch.zeros(1, l1_size)
+running_std = torch.ones(1, l1_size)
+
 
 def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.Tensor]:
     embedding_space = torch.randn(
@@ -21,14 +25,15 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     # Layer One
     w1 = torch.empty(block_size * embedding_dims, l1_size)
     torch.nn.init.kaiming_normal_(w1, mode="fan_in", nonlinearity="tanh")
-    b1 = torch.randn(l1_size) * 0.01
+    bn_w = torch.ones(1, l1_size)
+    bn_b = torch.zeros(1, l1_size)
 
     # Output layer
     # Make weights smaller as to prevent initial overconfidence
     w_out = torch.randn(l1_size, l_out_size) * 0.01
     b_out = torch.zeros(l_out_size) * 0
 
-    parameters = [embedding_space, w1, b1, w_out, b_out]
+    parameters = [embedding_space, w1, bn_w, bn_b, w_out, b_out]
     for p in parameters:
         p.requires_grad = True
 
@@ -40,7 +45,7 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     for i in range(1000):
         lr = lrs[i]
         loss = compute_minibatch_loss(
-            minibatch_size, x, y, embedding_space, w1, b1, w_out, b_out
+            minibatch_size, x, y, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
         )[0]
         lr_loss.append(loss.item())
 
@@ -59,7 +64,7 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     for next_train_cap in range(train_iter):
         lr = optimized_lr / 100 if next_train_cap > train_iter * 0.75 else optimized_lr
         loss = compute_minibatch_loss(
-            minibatch_size, x, y, embedding_space, w1, b1, w_out, b_out
+            minibatch_size, x, y, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
         )[0]
 
         for p in parameters:
@@ -71,32 +76,29 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
             p.data += -lr * p.grad
 
     test_loss, test_data_loss, test_reg_loss = compute_overall_loss(
-        x, y, embedding_space, w1, b1, w_out, b_out
+        x, y, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
     )
     print(f"Test loss = {test_loss.item()}")
     print(f"Test data loss = {test_data_loss.item()}")
     print(f"Test reg loss = {test_reg_loss.item()}")
 
-    return [embedding_space, w1, b1, w_out, b_out]
+    return [embedding_space, w1, bn_w, bn_b, w_out, b_out]
 
 
 # Compute overall loss for validation/testing
 @torch.no_grad()
 def compute_overall_loss(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    embedding_space: torch.Tensor,
-    w1: torch.Tensor,
-    b1: torch.Tensor,
-    w_out: torch.Tensor,
-    b_out: torch.Tensor,
+    x: torch.Tensor, y: torch.Tensor, parameters: list[torch.Tensor]
 ) -> list[torch.Tensor]:
+    embedding_space, w1, bn_w, bn_b, w_out, b_out = parameters
     cur_embeddings = embedding_space[x]
 
     # Perform layer one calculation
     # - Note that we resize to (-1, block_size * embedding_dims) in order to pass all block_size * embedding_dims vals to the first layer
     # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
-    l1_out = torch.tanh(cur_embeddings.view(-1, block_size * embedding_dims) @ w1 + b1)
+    l1_preact = cur_embeddings.view(-1, block_size * embedding_dims) @ w1
+    l1_bn = bn_w * (l1_preact - running_mean / running_std) + bn_b
+    l1_out = torch.tanh(l1_bn)
 
     # Compute the output and loss
     logits = l1_out @ w_out + b_out
@@ -111,19 +113,27 @@ def compute_minibatch_loss(
     batch_size: int,
     x: torch.Tensor,
     y: torch.Tensor,
-    embedding_space: torch.Tensor,
-    w1: torch.Tensor,
-    b1: torch.Tensor,
-    w_out: torch.Tensor,
-    b_out: torch.Tensor,
+    parameters: list[torch.Tensor],
 ) -> list[torch.Tensor]:
+    embedding_space, w1, bn_w, bn_b, w_out, b_out = parameters
     minibatch_idx = torch.randint(0, x.shape[0], (batch_size,))
     cur_embeddings = embedding_space[x[minibatch_idx]]
 
     # Perform layer one calculation
     # - Note that we resize to (-1, block_size * embedding_dims) in order to pass all block_size * embedding_dims vals to the first layer
     # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
-    l1_out = torch.tanh(cur_embeddings.view(-1, block_size * embedding_dims) @ w1 + b1)
+    l1_preact = cur_embeddings.view(-1, block_size * embedding_dims) @ w1
+
+    # Perform batch normalization to prevent preact from saturating due to badly scaled gradients
+    preact_mean = l1_preact.mean(0, keepdim=True)
+    preact_std = l1_preact.std(0, keepdim=True)
+    l1_bn = bn_w * ((l1_preact - preact_mean) / preact_std) + bn_b
+    l1_out = torch.tanh(l1_bn)
+
+    with torch.no_grad():
+        global running_mean, running_std
+        running_mean = 0.999 * running_mean + 0.001 * preact_mean
+        running_std = 0.999 * running_std + 0.001 * preact_std
 
     # Compute the output and loss
     logits = l1_out @ w_out + b_out
@@ -136,14 +146,10 @@ def compute_minibatch_loss(
 
 @torch.no_grad()
 def infer(
-    num_words: int,
-    itos: dict[int, str],
-    embedding_space: torch.Tensor,
-    w1: torch.Tensor,
-    b1: torch.Tensor,
-    w_out: torch.Tensor,
-    b_out: torch.Tensor,
+    num_words: int, itos: dict[int, str], parameters: list[torch.Tensor]
 ) -> list[str]:
+    embedding_space, w1, bn_w, bn_b, w_out, b_out = parameters
+
     predictions = [""] * num_words
     for i in range(num_words):
         context = torch.tensor([0] * block_size)
@@ -155,9 +161,9 @@ def infer(
             # Compute the forward pass and find the probabilities
             cur_embeddings = embedding_space[context]
 
-            hidden_out = torch.tanh(
-                cur_embeddings.view(-1, block_size * embedding_dims) @ w1 + b1
-            )
+            hidden_preact = cur_embeddings.view(-1, block_size * embedding_dims) @ w1
+            hidden_bn = bn_w * ((hidden_preact - running_mean) / running_std) + bn_b
+            hidden_out = torch.tanh(hidden_bn)
 
             logits = hidden_out @ w_out + b_out
             prob = torch.softmax(logits, dim=1)
@@ -190,18 +196,18 @@ def train_call():
     x_val, y_val = create_data_splits(words[0:val_split], stoi, block_size)
     x_test, y_test = create_data_splits(words[0:test_split], stoi, block_size)
 
-    embedding_space, w1, b1, w_out, b_out = train_mlp(
+    embedding_space, w1, bn_w, bn_b, w_out, b_out = train_mlp(
         x_train, y_train, num_training_iter
     )
     val_loss, val_data_loss, val_reg_loss = compute_overall_loss(
-        x_val, y_val, embedding_space, w1, b1, w_out, b_out
+        x_val, y_val, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
     )
 
     print(f"\nVal loss = {val_loss.item()}")
     print(f"Val data loss = {val_data_loss.item()}")
     print(f"Val reg loss = {val_reg_loss.item()}")
 
-    predictions = infer(10, itos, embedding_space, w1, b1, w_out, b_out)
+    predictions = infer(10, itos, [embedding_space, w1, bn_w, bn_b, w_out, b_out])
     print("\nPredictions:")
     for prediction in predictions:
         print(prediction)
