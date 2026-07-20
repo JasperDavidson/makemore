@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from helpers import find_mappings, create_data_splits
 import random
 
@@ -8,34 +9,125 @@ embedding_dims = 10
 num_training_iter = 100000
 reg_loss_param = 0.01
 minibatch_size = 100
+momentum = 0.1
+bn_epsilon = 1e-5
 
 l1_size = 300
 l_out_size = 27  # Matches number of character options
 
-# Learned parameters
-running_mean = torch.zeros(1, l1_size)
-running_std = torch.ones(1, l1_size)
+
+class BatchNorm(nn.Module):
+    def __init__(self, fan_out: int, momentum: float, epsilon: float):
+        super().__init__()
+
+        self.gamma = nn.Parameter(torch.randn(1, fan_out))
+        self.beta = nn.Parameter(torch.zeros(1, fan_out))
+        self.running_mean = nn.Buffer(torch.zeros(1, fan_out))
+        self.running_var = nn.Buffer(torch.ones(1, fan_out))
+        self.momentum = momentum
+        self.epsilon = epsilon
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        cur_mean = x.mean(dim=0, keepdim=True) if self.training else self.running_mean
+        cur_var = x.var(dim=0, keepdim=True) if self.training else self.running_var
+        norm_preact = (
+            self.gamma * ((x - cur_mean) / (cur_var + self.epsilon) ** 0.5) + self.beta
+        )
+
+        if self.training:
+            self.running_mean = (
+                1 - self.momentum
+            ) * self.running_mean + self.momentum * cur_mean
+            self.running_var = (
+                1 - self.momentum
+            ) * self.running_var + self.momentum * cur_var
+
+        return norm_preact
 
 
-def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.Tensor]:
-    embedding_space = torch.randn(
-        27, embedding_dims
-    )  # Randomly initialize the embeddings, learned via gradient optimization
+class HiddenLinear(nn.Module):
+    def __init__(
+        self,
+        fan_in: int,
+        fan_out: int,
+    ):
+        super().__init__()
 
-    # Layer One
-    w1 = torch.empty(block_size * embedding_dims, l1_size)
-    torch.nn.init.kaiming_normal_(w1, mode="fan_in", nonlinearity="tanh")
-    bn_w = torch.ones(1, l1_size)
-    bn_b = torch.zeros(1, l1_size)
+        self.weights = nn.Parameter(torch.randn(fan_out, fan_in))
+        nn.init.kaiming_normal_(self.weights, mode="fan_in", nonlinearity="tanh")
 
-    # Output layer
-    # Make weights smaller as to prevent initial overconfidence
-    w_out = torch.randn(l1_size, l_out_size) * 0.01
-    b_out = torch.zeros(l_out_size) * 0
+        self.bn = BatchNorm(fan_out, momentum, bn_epsilon)
 
-    parameters = [embedding_space, w1, bn_w, bn_b, w_out, b_out]
-    for p in parameters:
-        p.requires_grad = True
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = x @ self.weights.t()
+        y_bn = self.bn(y)
+        y_act = torch.tanh(y_bn)
+
+        return y_act
+
+    def reg_loss(self) -> torch.Tensor:
+        return (self.weights**2).mean()
+
+
+class OutLinear(nn.Module):
+    def __init__(
+        self,
+        fan_in: int,
+        fan_out: int,
+    ):
+        super().__init__()
+
+        self.weights = nn.Parameter(torch.randn(fan_out, fan_in) * 0.01)
+        self.bias = nn.Parameter(torch.zeros(1, fan_out))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x @ self.weights.t() + self.bias
+
+    def reg_loss(self) -> torch.Tensor:
+        return (self.weights**2).mean()
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        block_size: int,
+        embedding_dims: int,
+        l1_size: int,
+        out_size: int,
+        embedding_card: int,
+    ):
+        super().__init__()
+
+        self.l1 = HiddenLinear(block_size * embedding_dims, l1_size)
+        self.out = OutLinear(l1_size, out_size)
+        self.embedding_space = nn.Embedding(embedding_card, embedding_dims)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        emb = self.embedding_space(x)
+        emb_flat = emb.view(emb.size(0), -1)
+
+        h = self.l1(emb_flat)
+        logits = self.out(h)
+
+        return logits
+
+    def reg_loss(self):
+        return self.l1.reg_loss() + self.out.reg_loss()
+
+    def backward(self, loss: torch.Tensor, lr: torch.Tensor):
+        for p in self.parameters():
+            p.grad = None
+        loss.backward()
+
+        with torch.no_grad():
+            for p in self.parameters():
+                assert p.grad is not None
+                p -= lr * p.grad
+
+
+def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> MLP:
+    model = MLP(block_size, embedding_dims, l1_size, l_out_size, 27)
+    model.train()
 
     # Ad hoc pre-training lr optimization
     lre = torch.linspace(-3, 0, 1000)
@@ -44,18 +136,10 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
 
     for i in range(1000):
         lr = lrs[i]
-        loss = compute_minibatch_loss(
-            minibatch_size, x, y, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
-        )[0]
+        loss = compute_minibatch_loss(minibatch_size, x, y, model)[0]
         lr_loss.append(loss.item())
 
-        for p in parameters:
-            p.grad = None
-        loss.backward()
-
-        for p in parameters:
-            assert p.grad is not None
-            p.data += -lr * p.grad
+        model.backward(loss, lr)
 
     min_loss_idx = lr_loss.index(min(lr_loss))
     optimized_lr = lrs[min_loss_idx]
@@ -63,47 +147,20 @@ def train_mlp(x: torch.Tensor, y: torch.Tensor, train_iter: int) -> list[torch.T
     # Perform the training forward and backward passes
     for next_train_cap in range(train_iter):
         lr = optimized_lr / 100 if next_train_cap > train_iter * 0.75 else optimized_lr
-        loss = compute_minibatch_loss(
-            minibatch_size, x, y, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
-        )[0]
+        loss = compute_minibatch_loss(minibatch_size, x, y, model)[0]
+        model.backward(loss, lr)
 
-        for p in parameters:
-            p.grad = None
-        loss.backward()
-
-        for p in parameters:
-            assert p.grad is not None
-            p.data += -lr * p.grad
-
-    test_loss, test_data_loss, test_reg_loss = compute_overall_loss(
-        x, y, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
-    )
-    print(f"Test loss = {test_loss.item()}")
-    print(f"Test data loss = {test_data_loss.item()}")
-    print(f"Test reg loss = {test_reg_loss.item()}")
-
-    return [embedding_space, w1, bn_w, bn_b, w_out, b_out]
+    return model
 
 
 # Compute overall loss for validation/testing
 @torch.no_grad()
 def compute_overall_loss(
-    x: torch.Tensor, y: torch.Tensor, parameters: list[torch.Tensor]
+    x: torch.Tensor, y: torch.Tensor, model: MLP
 ) -> list[torch.Tensor]:
-    embedding_space, w1, bn_w, bn_b, w_out, b_out = parameters
-    cur_embeddings = embedding_space[x]
-
-    # Perform layer one calculation
-    # - Note that we resize to (-1, block_size * embedding_dims) in order to pass all block_size * embedding_dims vals to the first layer
-    # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
-    l1_preact = cur_embeddings.view(-1, block_size * embedding_dims) @ w1
-    l1_bn = bn_w * (l1_preact - running_mean / running_std) + bn_b
-    l1_out = torch.tanh(l1_bn)
-
-    # Compute the output and loss
-    logits = l1_out @ w_out + b_out
+    logits = model(x)
     data_loss = torch.nn.functional.cross_entropy(logits, y)
-    reg_loss = (w1**2).mean() + (w_out**2).mean()
+    reg_loss = model.reg_loss()
     loss = data_loss + reg_loss_param * reg_loss
 
     return [loss, data_loss, reg_loss]
@@ -113,59 +170,32 @@ def compute_minibatch_loss(
     batch_size: int,
     x: torch.Tensor,
     y: torch.Tensor,
-    parameters: list[torch.Tensor],
+    model: MLP,
 ) -> list[torch.Tensor]:
-    embedding_space, w1, bn_w, bn_b, w_out, b_out = parameters
     minibatch_idx = torch.randint(0, x.shape[0], (batch_size,))
-    cur_embeddings = embedding_space[x[minibatch_idx]]
-
-    # Perform layer one calculation
-    # - Note that we resize to (-1, block_size * embedding_dims) in order to pass all block_size * embedding_dims vals to the first layer
-    # - tanh introduces non-linearity into the system, addressing the flaw of the simple 27-neuron layer by allowing the network to learn features
-    l1_preact = cur_embeddings.view(-1, block_size * embedding_dims) @ w1
-
-    # Perform batch normalization to prevent preact from saturating due to badly scaled gradients
-    preact_mean = l1_preact.mean(0, keepdim=True)
-    preact_std = l1_preact.std(0, keepdim=True)
-    l1_bn = bn_w * ((l1_preact - preact_mean) / preact_std) + bn_b
-    l1_out = torch.tanh(l1_bn)
-
-    with torch.no_grad():
-        global running_mean, running_std
-        running_mean = 0.999 * running_mean + 0.001 * preact_mean
-        running_std = 0.999 * running_std + 0.001 * preact_std
+    x_batch = x[minibatch_idx]
+    y_batch = y[minibatch_idx]
 
     # Compute the output and loss
-    logits = l1_out @ w_out + b_out
-    data_loss = torch.nn.functional.cross_entropy(logits, y[minibatch_idx])
-    reg_loss = (w1**2).mean() + (w_out**2).mean()
+    logits = model(x_batch)
+    data_loss = torch.nn.functional.cross_entropy(logits, y_batch)
+    reg_loss = model.reg_loss()
     loss = data_loss + reg_loss_param * reg_loss
 
     return [loss, data_loss, reg_loss]
 
 
 @torch.no_grad()
-def infer(
-    num_words: int, itos: dict[int, str], parameters: list[torch.Tensor]
-) -> list[str]:
-    embedding_space, w1, bn_w, bn_b, w_out, b_out = parameters
-
+def infer(num_words: int, itos: dict[int, str], model: MLP) -> list[str]:
     predictions = [""] * num_words
     for i in range(num_words):
-        context = torch.tensor([0] * block_size)
+        context = torch.zeros(block_size, dtype=torch.long)
         cur_char = 0
 
         while True:
             predictions[i] += itos[cur_char]
 
-            # Compute the forward pass and find the probabilities
-            cur_embeddings = embedding_space[context]
-
-            hidden_preact = cur_embeddings.view(-1, block_size * embedding_dims) @ w1
-            hidden_bn = bn_w * ((hidden_preact - running_mean) / running_std) + bn_b
-            hidden_out = torch.tanh(hidden_bn)
-
-            logits = hidden_out @ w_out + b_out
+            logits = model.forward(context.unsqueeze(0))
             prob = torch.softmax(logits, dim=1)
 
             # Sample to find the next char and update context
@@ -196,18 +226,23 @@ def train_call():
     x_val, y_val = create_data_splits(words[0:val_split], stoi, block_size)
     x_test, y_test = create_data_splits(words[0:test_split], stoi, block_size)
 
-    embedding_space, w1, bn_w, bn_b, w_out, b_out = train_mlp(
-        x_train, y_train, num_training_iter
-    )
-    val_loss, val_data_loss, val_reg_loss = compute_overall_loss(
-        x_val, y_val, [embedding_space, w1, bn_w, bn_b, w_out, b_out]
+    model = train_mlp(x_train, y_train, num_training_iter)
+
+    model.eval()
+    val_loss, val_data_loss, val_reg_loss = compute_overall_loss(x_val, y_val, model)
+    test_loss, test_data_loss, test_reg_loss = compute_overall_loss(
+        x_test, y_test, model
     )
 
     print(f"\nVal loss = {val_loss.item()}")
     print(f"Val data loss = {val_data_loss.item()}")
     print(f"Val reg loss = {val_reg_loss.item()}")
 
-    predictions = infer(10, itos, [embedding_space, w1, bn_w, bn_b, w_out, b_out])
+    print(f"\nTest loss = {test_loss.item()}")
+    print(f"Test data loss = {test_data_loss.item()}")
+    print(f"Test reg loss = {test_reg_loss.item()}")
+
+    predictions = infer(10, itos, model)
     print("\nPredictions:")
     for prediction in predictions:
         print(prediction)
