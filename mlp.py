@@ -20,10 +20,10 @@ class BatchNorm(nn.Module):
     def __init__(self, fan_out: int, momentum: float, epsilon: float):
         super().__init__()
 
-        self.gamma = nn.Parameter(torch.randn(1, fan_out))
+        self.gamma = nn.Parameter(torch.ones(1, fan_out))
         self.beta = nn.Parameter(torch.zeros(1, fan_out))
-        self.running_mean = nn.Buffer(torch.zeros(1, fan_out))
-        self.running_var = nn.Buffer(torch.ones(1, fan_out))
+        self.register_buffer("running_mean", torch.zeros(1, fan_out))
+        self.register_buffer("running_var", torch.ones(1, fan_out))
         self.momentum = momentum
         self.epsilon = epsilon
 
@@ -223,8 +223,8 @@ def train_call():
     test_split = len(words)
 
     x_train, y_train = create_data_splits(words[0:train_split], stoi, block_size)
-    x_val, y_val = create_data_splits(words[0:val_split], stoi, block_size)
-    x_test, y_test = create_data_splits(words[0:test_split], stoi, block_size)
+    x_val, y_val = create_data_splits(words[train_split:val_split], stoi, block_size)
+    x_test, y_test = create_data_splits(words[val_split:test_split], stoi, block_size)
 
     model = train_mlp(x_train, y_train, num_training_iter)
 
