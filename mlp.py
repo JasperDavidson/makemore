@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-from helpers import find_mappings, create_data_splits
-import random
+import helpers
 
 # Hyperparameters
 block_size = 3
@@ -214,17 +213,12 @@ def train_call():
     # Word dataset to train off of
     words = open("names.txt", "r").read().splitlines()
     chars = sorted(list(set("".join(words))))
-    itos, stoi = find_mappings(chars, ".")
+    itos, stoi = helpers.find_mappings(chars, ".")
 
-    # Build training and validation datasets
-    random.shuffle(words)
-    train_split = int(len(words) * 0.8)
-    val_split = int(len(words) * 0.9)
-    test_split = len(words)
-
-    x_train, y_train = create_data_splits(words[0:train_split], stoi, block_size)
-    x_val, y_val = create_data_splits(words[train_split:val_split], stoi, block_size)
-    x_test, y_test = create_data_splits(words[val_split:test_split], stoi, block_size)
+    data_sets = helpers.compute_data_sets(block_size)
+    x_train, y_train = data_sets.training.x, data_sets.training.y
+    x_val, y_val = data_sets.validation.x, data_sets.validation.y
+    x_test, y_test = data_sets.test.x, data_sets.test.y
 
     model = train_mlp(x_train, y_train, num_training_iter)
 

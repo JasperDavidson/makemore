@@ -1,4 +1,18 @@
 import torch
+import random
+
+
+class DataSet:
+    def __init__(self, x: torch.Tensor, y: torch.Tensor):
+        self.x = x
+        self.y = y
+
+
+class DataSets:
+    def __init__(self, training: DataSet, validation: DataSet, test: DataSet):
+        self.training = training
+        self.validation = validation
+        self.test = test
 
 
 def find_mappings(rep: list[str], term: str) -> tuple[dict[int, str], dict[str, int]]:
@@ -12,7 +26,7 @@ def find_mappings(rep: list[str], term: str) -> tuple[dict[int, str], dict[str, 
 
 def create_data_splits(
     words: list[str], stoi: dict[str, int], block_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> DataSet:
     training, validation = [], []
 
     for word in words:
@@ -27,4 +41,21 @@ def create_data_splits(
     training = torch.tensor(training)
     validation = torch.tensor(validation)
 
-    return (training, validation)
+    return DataSet(training, validation)
+
+
+def compute_data_sets(block_size: int) -> DataSets:
+    words = open("names.txt", "r").read().splitlines()
+    chars = sorted(list(set("".join(words))))
+    _, stoi = find_mappings(chars, ".")
+
+    random.shuffle(words)
+    train_split = int(len(words) * 0.8)
+    val_split = int(len(words) * 0.9)
+    test_split = len(words)
+
+    training_set = create_data_splits(words[0:train_split], stoi, block_size)
+    validation_set = create_data_splits(words[train_split:val_split], stoi, block_size)
+    test_set = create_data_splits(words[val_split:test_split], stoi, block_size)
+
+    return DataSets(training_set, validation_set, test_set)
