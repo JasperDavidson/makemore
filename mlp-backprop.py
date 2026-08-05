@@ -34,12 +34,29 @@ class MLPParams:
 
     @property
     def all(self) -> list[torch.Tensor]:
-        return [self.w_emb, self.w1, self.b1, self.w2, self.b2, self.bn_gamma, self.bn_beta]
+        return [
+            self.w_emb,
+            self.w1,
+            self.b1,
+            self.w2,
+            self.b2,
+            self.bn_gamma,
+            self.bn_beta,
+        ]
 
 
 @dataclass
 class ForwardState:
     """Intermediate tensors from the decomposed forward pass."""
+
+    # Parameters (same tensors as MLPParams — so state.w2.grad etc. work)
+    w_emb: torch.Tensor
+    w1: torch.Tensor
+    b1: torch.Tensor
+    w2: torch.Tensor
+    b2: torch.Tensor
+    bn_gamma: torch.Tensor
+    bn_beta: torch.Tensor
 
     emb: torch.Tensor
     emb_flat: torch.Tensor
@@ -176,6 +193,13 @@ def forward(
     loss = -log_probs[torch.arange(n), yb].mean()
 
     return ForwardState(
+        w_emb=w_emb,
+        w1=w1,
+        b1=b1,
+        w2=w2,
+        b2=b2,
+        bn_gamma=gamma,
+        bn_beta=beta,
         emb=emb,
         emb_flat=emb_flat,
         pre_bn=pre_bn,
@@ -231,9 +255,8 @@ def main() -> None:
     print(f"num params: {sum(p.nelement() for p in params.all)}")
 
     xb, yb = sample_minibatch(xtr, ytr, batch_size, g)
-    n = batch_size
 
-    state = forward(xb, yb, params, n=n, bn_epsilon=bn_epsilon)
+    state = forward(xb, yb, params, n=batch_size, bn_epsilon=bn_epsilon)
 
     zero_grad(params)
     retain_intermediate_grads(state)
@@ -243,9 +266,66 @@ def main() -> None:
     # Work backwards from dlog_probs, then call cmp() for each tensor.
     #
     # Example (once you've derived the gradient):
-    #   dlog_probs = torch.zeros_like(state.log_probs)
-    #   dlog_probs[torch.arange(n), yb] = -1.0 / n
-    #   cmp("log_probs", dlog_probs, state.log_probs)
+    dlog_probs = torch.zeros_like(state.log_probs)
+    dlog_probs[torch.arange(batch_size), yb] = -1.0 / batch_size
+    cmp("log_probs", dlog_probs, state.log_probs)
+
+    d_probs = dlog_probs / state.probs
+    cmp("probs", d_probs, state.probs)
+
+    d_inv_exp_sum = (d_probs * state.exp_logits).sum(1, keepdim=True)
+    cmp("inv_exp_sum", d_inv_exp_sum, state.inv_exp_sum)
+
+    d_exp_sum = -1 * state.exp_sum**-2 * d_inv_exp_sum
+    cmp("exp_sum", d_exp_sum, state.exp_sum)
+
+    d_exp_logits = d_probs * state.inv_exp_sum + d_exp_sum
+    cmp("exp_logits", d_exp_logits, state.exp_logits)
+
+    d_logits_shifted = d_exp_logits * state.exp_logits
+    cmp("logits_shifted", d_logits_shifted, state.logits_shifted)
+
+    d_logit_max = d_logits_shifted.sum(1, keepdim=True) * -1.0
+    cmp("logit_max", d_logit_max, state.logit_max)
+
+    max_selector = torch.zeros_like(state.logits)
+    max_selector[torch.arange(batch_size), state.logits.argmax(1)] = 1.0
+    d_logits = d_logits_shifted + d_logit_max * max_selector
+    cmp("logits", d_logits, state.logits)
+
+    ### Non-batched
+    # dlogits_j/dw2_i_j = h_i
+    # dloss/dw2_i_j = dloss/dlogits_j * h_i
+
+    ### Batched
+    # dlogits_b_j/dw2_i_j = h_b_i
+    # dloss/dw2_i_j = sum(dloss/dlogits_b_j * h_b_i) over b
+    # dloss/dlogits -> (batch size, vocab size)
+    # h -> (batch_size, hidden_size)
+    d_w2 = state.h.T @ d_logits
+    cmp("w2", d_w2, state.w2)
+
+    ### Non-batched
+    # dlogits_j/d_h_k = w_k_j
+    # dloss/d_h_k = sum(dloss/dlogits_j * w_k_j) over j
+
+    ### Batched
+    # dlogits_b_j/d_h_b_k = w_k_j
+    # dloss/d_h_b_k = sum(dloss/dlogits_b_j * w_k_j) over j
+    # dloss/dlogits -> (batch size, vocab size)
+    # w -> (hidden size, batch size)
+    d_h = d_logits @ state.w2.T
+    cmp("h", d_h, state.h)
+
+    ### Non-batched
+    # dlogits_j/d_b2 = 1
+    # dloss/d_b2 = dloss/dlogits
+
+    ### Batched
+    # dlogits_b_j/d_b2 = 1
+    # dloss/d_b2 = sum(dloss/dlogits_b) over b
+    d_b2 = d_logits.sum(dim=0)
+    cmp("b2", d_b2, state.b2)
 
 
 if __name__ == "__main__":
