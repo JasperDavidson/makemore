@@ -410,6 +410,55 @@ def main() -> None:
     d_bn_mean = -1 * d_bn_centered.sum(dim=0)
     cmp("bn_mean", d_bn_mean, state.bn_mean)
 
+    ##### Equation: bn_mean = (1 / n) * pre_bn.sum(dim=0, keepdim=True)
+    # pre_bn = (batch, hidden)
+    # bn_mean = (1, hidden)
+
+    # d_bn_mean_j/d_pre_bn_b_j = 1 / n
+    # d_loss/d_d_pre_bn_b_j = d_loss/d_bn_mean_j * (1 / n)
+    d_pre_bn += d_bn_mean * (1 / batch_size)
+    cmp("pre_bn", d_pre_bn, state.pre_bn)
+
+    ##### Equation: pre_bn = emb_flat @ w1 + b1
+    # pre_bn = (batch, hidden)
+    # emb_flat = (batch, h_in)
+    # w1 = (h_in, hidden)
+    # b1 = (1, hidden)
+
+    # (batch, in)
+    # d_pre_bn_b_k/d_emb_flat_b_i = w1_i_k
+    # d_loss/d_emb_flat_b_i = d_loss/d_pre_bn_b_k * w1_i_k
+    d_emb_flat = d_pre_bn @ state.w1.T
+    cmp("emb_flat", d_emb_flat, state.emb_flat)
+
+    # (in, hidden)
+    # d_pre_bn_b_k/d_w1_i_k = emb_flat_b_i
+    # d_loss/d_w1_i_k = d_loss/d_pre_bn_b_k * emb_flat_b_i
+    d_w1 = state.emb_flat.T @ d_pre_bn
+    cmp("w1", d_w1, state.w1)
+
+    # (1, hidden)
+    # d_pre_bn_b_k/d_b1_k = 1
+    # d_loss/d_b1_k = (d_loss/d_pre_bn_b_k) sum over b
+    d_b1 = d_pre_bn.sum(dim=0)
+    cmp("b1", d_b1, state.b1)
+
+    ##### Equation: emb_flat = emb.view(emb.shape[0], -1)
+
+    # Note no actual gradient, just reshaping the representation
+    d_emb = d_emb_flat.view(batch_size, block_size, n_embd)
+
+    ##### Equation: emb = w_emb[xb]
+    # w_emb = (vocab_size, n_emb)
+    # emb = (batch, block_size, n_emb)
+    # xb = (batch, block_size)
+
+    d_w_emb = torch.zeros_like(state.w_emb)
+    for batch_idx in range(batch_size):
+        for block_idx in range(block_size):
+            d_w_emb[xb[batch_idx][block_idx]] += d_emb[batch_idx][block_idx]
+    cmp("d_w_emb", d_w_emb, state.w_emb)
+
 
 if __name__ == "__main__":
     main()
