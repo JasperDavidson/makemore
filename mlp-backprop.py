@@ -293,39 +293,122 @@ def main() -> None:
     d_logits = d_logits_shifted + d_logit_max * max_selector
     cmp("logits", d_logits, state.logits)
 
+    ##### Equation: logits = h @ w2 + b2
+
     ### Non-batched
     # dlogits_j/dw2_i_j = h_i
-    # dloss/dw2_i_j = dloss/dlogits_j * h_i
+    # d_loss/dw2_i_j = d_loss/dlogits_j * h_i
 
-    ### Batched
-    # dlogits_b_j/dw2_i_j = h_b_i
-    # dloss/dw2_i_j = sum(dloss/dlogits_b_j * h_b_i) over b
-    # dloss/dlogits -> (batch size, vocab size)
+    ### Batched # dlogits_b_j/dw2_i_j = h_b_i
+    # d_loss/dw2_i_j = sum(d_loss/dlogits_b_j * h_b_i) over b
+    # d_loss/dlogits -> (batch size, vocab size)
     # h -> (batch_size, hidden_size)
     d_w2 = state.h.T @ d_logits
     cmp("w2", d_w2, state.w2)
 
     ### Non-batched
     # dlogits_j/d_h_k = w_k_j
-    # dloss/d_h_k = sum(dloss/dlogits_j * w_k_j) over j
+    # d_loss/d_h_k = sum(d_loss/dlogits_j * w_k_j) over j
 
     ### Batched
     # dlogits_b_j/d_h_b_k = w_k_j
-    # dloss/d_h_b_k = sum(dloss/dlogits_b_j * w_k_j) over j
-    # dloss/dlogits -> (batch size, vocab size)
+    # d_loss/d_h_b_k = sum(d_loss/dlogits_b_j * w_k_j) over j
+    # d_loss/dlogits -> (batch size, vocab size)
     # w -> (hidden size, batch size)
     d_h = d_logits @ state.w2.T
     cmp("h", d_h, state.h)
 
     ### Non-batched
     # dlogits_j/d_b2 = 1
-    # dloss/d_b2 = dloss/dlogits
+    # d_loss/d_b2 = d_loss/dlogits
 
     ### Batched
     # dlogits_b_j/d_b2 = 1
-    # dloss/d_b2 = sum(dloss/dlogits_b) over b
+    # d_loss/d_b2 = sum(d_loss/dlogits_b) over b
     d_b2 = d_logits.sum(dim=0)
     cmp("b2", d_b2, state.b2)
+
+    ##### Equation: h = torch.tanh(pre_act)
+
+    # d_h/d_preact = 1 - tanh^2(preact)
+    # d_loss/d_preact = d_loss/d_h * (1 - tanh^2(preact))
+    d_pre_act = d_h * (1 - torch.tanh(state.pre_act) ** 2)
+    cmp("pre_act", d_pre_act, state.pre_act)
+
+    ##### Equation: pre_act = gamma + bn_norm + beta
+
+    ### Non-batched
+    # d_pre_act_j/d_gamma_j = bn_norm_j
+    # d_loss/d_gamma_j = d_loss/d_pre_act_j * bn_norm_j
+
+    ### Batched
+    # d_pre_act_b_j/d_gamma_j = bn_norm_b_j
+    # d_loss/d_gamma_j = (d_loss/d_pre_act_b_j * bn_norm_b_j) sum over b
+    d_bngamma = (d_pre_act * state.bn_norm).sum(dim=0, keepdim=True)
+    cmp("gamma", d_bngamma, state.bn_gamma)
+
+    ### Non-batched
+    # d_pre_act_j/d_bn_norm_j = gamma_j
+    # d_loss/d_bn_norm_j = d_loss/d_pre_act_j * gamma_j
+
+    ### Batched
+    # d_pre_act_b_j/d_bn_norm_b_j = gamma_j
+    # d_loss/d_bn_norm_b_j = d_loss/d_pre_act_b_j * gamma_j
+    d_bn_norm = d_pre_act * state.bn_gamma
+    cmp("bn_norm", d_bn_norm, state.bn_norm)
+
+    # d_loss/d_beta_j = (d_loss/d_pre_act_b_j) sum over b
+    d_bnbeta = d_pre_act.sum(dim=0)
+    cmp("beta", d_bnbeta, state.bn_beta)
+
+    ##### Equation: bn_norm = bn_centered * bn_inv_std
+
+    # (batch, hidden) * (1, hidden) -> elementwise
+    # d_bn_norm_b_j/d_bn_centered_b_j = bn_inv_std_j
+    # d_loss/d_bn_centered_b_j = d_loss/d_bn_norm_b_j * bn_inv_std_j
+    d_bn_centered = d_bn_norm * state.bn_inv_std
+
+    # d_bn_norm_b_j/d_bn_inv_std_j = bn_centered_b_j
+    # d_loss/d_bn_inv_std = (d_loss/d_bn_norm_b_j * bn_centered_b_j) sum over b
+    d_bn_inv_std = (d_bn_norm * state.bn_centered).sum(dim=0, keepdim=True)
+    cmp("bn_inv_std", d_bn_inv_std, state.bn_inv_std)
+
+    ##### Equation: bn_inv_std = (bn_var + bn_epsilon) ** -0.5
+
+    # d_bn_inv_std/d_bn_var = -1/2 * (bn_var + bn_epsilon) ** -1.5
+    # d_loss/b_bn_var = d_loss/bn_inv_std * (-1/2 * (bn_var + bn_epsilon) ** -1.5)
+    d_bn_var = d_bn_inv_std * (-0.5 * (state.bn_var + bn_epsilon) ** (-1.5))
+    cmp("bn_var", d_bn_var, state.bn_var)
+
+    # d_loss/b_bn_epsilon = 0 since it is constant
+
+    ##### Equation: bn_var = (1 / (n - 1)) * bn_centered_sq.sum(dim=0, keepdim=True)
+
+    # d_bn_var_j/d_bn_centered_sq_b_j = 1 / (n - 1) for all j
+    # d_loss/d_bn_centered_sq_b_j = d_loss/d_bn_var_j * ((1) / (n - 1) for all j)
+    d_bn_centered_sq = (
+        torch.ones_like(state.bn_centered_sq) * d_bn_var * (batch_size - 1) ** -1
+    )  # Note the explicit broadcasting here
+    cmp("bn_centered_sq", d_bn_centered_sq, state.bn_centered_sq)
+
+    ##### Equation: bn_centered_sq = bn_centered**2
+
+    # d_bn_centered_sq_b_j/d_bn_centered_b_j = 2 * bn_centered_b_j
+    # d_loss/d_bn_centered_b_j = d_loss/d_bn_centered_sq_b_j * 2 * bn_centered_b_j
+    d_bn_centered += d_bn_centered_sq * (2 * state.bn_centered)
+    cmp("bn_centered", d_bn_centered, state.bn_centered)
+
+    ##### Equation: bn_centered = pre_bn - bn_mean -> (batch, hidden) = (batch, hidden) - (1, hidden)
+
+    # d_bn_centered_b_j/d_pre_bn_b_j = 1
+    # d_loss/d_pre_bn_b_j = d_loss/d_bn_centered_b_j
+    d_pre_bn = d_bn_centered
+    # TODO: cmp("pre_bn", d_pre_bn, state.pre_bn)
+
+    # d_bn_centered_b_j/d_bn_mean_j = -1
+    # d_loss/d_bn_mean_j = -1 * (d_loss/d_bn_centered_b_j) sum over b
+    d_bn_mean = -1 * d_bn_centered.sum(dim=0)
+    cmp("bn_mean", d_bn_mean, state.bn_mean)
 
 
 if __name__ == "__main__":
