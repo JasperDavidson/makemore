@@ -9,13 +9,14 @@ import helpers
 # --- Hyperparameters ---
 block_size = 8
 n_embd = 10
-n_hidden = 200
+n_hidden = 68
 vocab_size = 27
 batch_size = 32
 max_steps = 200000
 bn_momentum = 0.1
 bn_epsilon = 1e-5
 seed = 42
+num_consec_param = 2
 
 
 # --- Layers ---
@@ -33,7 +34,9 @@ class Linear(nn.Module):
 
 
 class BatchNorm1d(nn.Module):
-    def __init__(self, dim: int, eps: float = bn_epsilon, momentum: float = bn_momentum):
+    def __init__(
+        self, dim: int, eps: float = bn_epsilon, momentum: float = bn_momentum
+    ):
         super().__init__()
         self.eps = eps
         self.momentum = momentum
@@ -43,8 +46,6 @@ class BatchNorm1d(nn.Module):
         self.register_buffer("running_var", torch.ones(1, dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Part 3 BatchNorm: expects 2D (batch, features).
-        # You'll revisit this when activations become 3D.
         if self.training:
             xmean = x.mean(dim=0, keepdim=True)
             xvar = x.var(dim=0, keepdim=True)
@@ -58,11 +59,11 @@ class BatchNorm1d(nn.Module):
         if self.training:
             with torch.no_grad():
                 self.running_mean = (
-                    (1 - self.momentum) * self.running_mean + self.momentum * xmean
-                )
+                    1 - self.momentum
+                ) * self.running_mean + self.momentum * xmean
                 self.running_var = (
-                    (1 - self.momentum) * self.running_var + self.momentum * xvar
-                )
+                    1 - self.momentum
+                ) * self.running_var + self.momentum * xvar
 
         return out
 
@@ -85,7 +86,7 @@ class Flatten(nn.Module):
     """Flatten the full context: (B, T, C) -> (B, T*C)."""
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x.view(x.shape[0], -1)
+        return x.view(*x.shape[:-2], -1)
 
 
 class Sequential(nn.Module):
@@ -95,19 +96,70 @@ class Sequential(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
+            if isinstance(x, Sequential):
+                x = layer(x)
             x = layer(x)
+
         return x
 
 
+class FlattenConsec(nn.Module):
+    """
+    Flatten num_consec consecutive block dimensions: (batch, block, ...) -> (batch, block / num_consec, ...)
+    """
+
+    def __init__(self, num_consec: int):
+        super().__init__()
+        self.num_consec = num_consec
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() < 3:
+            raise ValueError(
+                f"Tensor {x} must have at least 3 (batch, block, ...) dimensions"
+            )
+        if x.shape[1] % self.num_consec != 0:
+            raise ValueError(
+                f"Tensor {x} must have a block dimension that is a multiple of num_consec"
+            )
+
+        new_block_dim = x.shape[1] // self.num_consec
+        new_token_dim = x.shape[2] * self.num_consec
+        x_flattened = x.view(x.shape[0], new_block_dim, new_token_dim)
+
+        if x_flattened.shape[1] == 1:
+            x_flattened = x_flattened.squeeze(dim=1)
+
+        return x_flattened
+
+
+def build_hierarchical_block(
+    num_consec: int, fan_in: int, fan_out: int, bias: bool = False
+) -> Sequential:
+    model = Sequential(
+        [
+            FlattenConsec(num_consec),
+            Linear(fan_in, fan_out),
+            BatchNorm1d(fan_out),
+            Tanh(),
+        ]
+    )
+
+    return model
+
+
 def build_mlp() -> Sequential:
-    """Flat MLP: embed -> flatten all context -> hidden -> logits."""
     model = Sequential(
         [
             Embedding(vocab_size, n_embd),
-            Flatten(),
-            Linear(n_embd * block_size, n_hidden, bias=False),
-            BatchNorm1d(n_hidden),
-            Tanh(),
+            build_hierarchical_block(
+                num_consec_param, n_embd * num_consec_param, n_hidden
+            ),
+            build_hierarchical_block(
+                num_consec_param, n_hidden * num_consec_param, n_hidden
+            ),
+            build_hierarchical_block(
+                num_consec_param, n_hidden * num_consec_param, n_hidden
+            ),
             Linear(n_hidden, vocab_size),
         ]
     )
@@ -230,14 +282,6 @@ def train_call() -> None:
     print("\nSamples:")
     for w in sample(model, itos):
         print(w)
-
-    # -------------------------------------------------------------------------
-    # WaveNet work starts here (lecture progression, implement yourself):
-    # - FlattenConsecutive(n): fuse n consecutive embeddings, keep a time axis
-    # - hierarchical stacking of FlattenConsecutive(2) + Linear blocks
-    # - BatchNorm that handles 3D (batch, time, channels) activations
-    # - scale n_embd / n_hidden once the architecture is in place
-    # -------------------------------------------------------------------------
 
 
 if __name__ == "__main__":
