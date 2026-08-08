@@ -291,6 +291,11 @@ def main() -> None:
     max_selector = torch.zeros_like(state.logits)
     max_selector[torch.arange(batch_size), state.logits.argmax(1)] = 1.0
     d_logits = d_logits_shifted + d_logit_max * max_selector
+
+    # optimized d_logits!
+    d_logits = state.probs.clone()
+    d_logits[torch.arange(batch_size), yb] -= 1
+    d_logits /= batch_size
     cmp("logits", d_logits, state.logits)
 
     ##### Equation: logits = h @ w2 + b2
