@@ -8,8 +8,8 @@ import helpers
 
 # --- Hyperparameters ---
 block_size = 8
-n_embd = 10
-n_hidden = 68
+n_embd = 24
+n_hidden = 128
 vocab_size = 27
 batch_size = 32
 max_steps = 200000
@@ -47,8 +47,8 @@ class BatchNorm1d(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
-            xmean = x.mean(dim=0, keepdim=True)
-            xvar = x.var(dim=0, keepdim=True)
+            xmean = x.mean(dim=tuple(range(x.dim() - 1)), keepdim=True)
+            xvar = x.var(dim=tuple(range(x.dim() - 1)), keepdim=True)
         else:
             xmean = self.running_mean
             xvar = self.running_var
