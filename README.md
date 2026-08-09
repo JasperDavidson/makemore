@@ -1,6 +1,7 @@
-My implementation of Makemore, following the Andrej Karpathy series "Zero to Hero" (https://karpathy.ai/zero-to-hero.html)
+My implementation of Makemore, following the Andrej Karpathy series "Zero to Hero" ([https://karpathy.ai/zero-to-hero.html](https://karpathy.ai/zero-to-hero.html))
 
 ## Part 1: Statistical Modeling and Single Layer NN
+
 This part contains two models that learn from the same probability distribution; they learn to predict the next character given the current character (a *bigram* model).
 
 For both models, a negative log likelihood function is used to calculate the data loss. This is used due to the classification nature of the models: we classify the next character by assigning a probability to a discrete number of characters to choose from. Critically, finding the likelihood allows us to assign a loss depending on how confident the model's probability was in the correct answer. The log, negative, and normalization portions are for making the data cleaner and easier to work with.
@@ -8,9 +9,13 @@ For both models, a negative log likelihood function is used to calculate the dat
 The first model is a simple statistical model that calculates the raw probability between every combination of letters. It does this by creating a matrix with every possible bigram (a single '.' to encode start/end and the 26 letters of the alphabet, so 27x27) and counts up every time they occur in the training dataset. Then, it normalizes the rows such that every letter can be mapped to a probability distribution of letters that may follow it. Finally, the next character to choose is sampled from this probability distribution.
 
 The second model is a single layer of 27 neurons (one logit for each possible next character). The key difference between this model and the prior, is that the prior model is in a fixed state. We can calculate raw probabilities and find the subsequent NLL, but there are no parameters by which we can attempt to optimize (lower) that loss. In this scenario where we only have one layer, and given that since we trying to represent probabilities via passing logits through softmax, we end up at the same lower bound as the statistical model. Fundamentally this is because the neurons effectively end up with the same direct representation as the statistical model: A 1x27 tensor lookup table of probabilities.
+
 - This model also includes the idea of renormalization loss. This acts as a parameter for model tuning by adding some avg. weights^2 term such that weights closer to zero incur less loss. This is favorable for ensuring that weights do not swing too far in the direction of a small data sample too quickly, and ensuring that model weights stay lower.
 
+
+
 ## Part Two: Multi-Layer Perceptron NN
+
 This part transitions from the basic, identical statistical/single-layer models of the last part to implementing prediction using a MLP.
 
 There are a few key properties that grants the MLP an advantage over the statistical/single-layer models.
@@ -20,15 +25,33 @@ First, the MLP introduces a "hidden layer" which acts as a layer of neurons in b
 Second, the MLP samples from `block_size` prior characters as its input rather than just the prior character. In addition, it utilizes an embedding space that each character is placed into, which through training helps the model learn the relationships and similarities between different characters. Notably these are not pre-programmed embeddings, but parameters that are trained like the rest of the network.
 
 As an additional note, this part also introduced the idea of splitting data into training/validation/test sets. Splitting the data like this is critical to preventing the model from overfit on the training data and fails to generalize to new scenarios; as with regularization loss it helps to combat overfitting.
+
 - Generally, the parameters (embeddings, weights, biases, etc.) of a network should be trained on the training set, whereas the hyperparameters are adjusted based on the validation set. Finally the test set is used to evaluate the models performance.
 
+
+
 ## Part Three: BatchNorm, Model Optimizations, and Pytorch style code
+
 This part focused on optimizing the multi-layer perceptron, and formalizing it in a more scalable manner. While the optimizations don't yield much effect on our simple model, as we build deeper and deeper networks these optimizations become critical to allow for more stable training.
 
 First, the model's initial loss can be skewed by the initial randomness of weight initialization. This can create scenarios with unnecessarily high loss in the beginning, leading to effectively wasted cycles full of "easy" initial loss reduction due to lowering the weights. An effective counter to this is to scale the initial randomized output weights down (e.g. x0.01) in order to minimize the initial loss. This is effectively countering initial, randomly generated overconfidence.
 
 The model can also suffer due to saturation of its activation layers. Here, `tanh` saturates as you approach -inf, +inf at -1, 1. The issue here is that the derivative of `tanh`, `(1 - tanh^2(x))`, then tends to 0 as the function saturates. Because of this, the gradient of the weights before a saturated `tanh` will have their gradient become very small due to the chain rule (this is an instance of a "vanishing gradients" problem). Because the gradients become very small, the weights take much longer to train, and as such the model requires many more training cycles in order learn optimal weights. There are two phases at which it's important to mitigate this.
+
 - Approaching this saturation problem at initialization is important to prevent saturated neurons, and premature saturation. This is done via kaiming initialization, which scales weights according to the layer's fan-in such that they do not grow or shrink dramatically over the course of many layers. In addition, a gain factor is included based on the activation function used. This gain factor helps prevent the reduction in variance that activation functions can enforce. For example, `tanh` squeezes all inputs into the range `[-1, 1]`, reducing variance, thus a gain is applied.
 - While kaiming initialization helps with preventing initial saturation and compaction, as the model learns its parameters prior layers can produce outputs that saturate later layers. However, as the network learns and prior weight values change, later pre-activation outputs may unnecessarily saturate the activation function (`tanh`) and prevent further learning. Ideally, the network should normalize the pre-activation outputs at each hidden layer to mitigate these effects, preserving the feature properties without saturating (and the later mentioned learned parameters can scale back up if desired). BatchNorm implements this normalizing of the outputs of every hidden layer pre-activation outputs, including learned parameters to tweak it over time (notably a vector of scalar mults for each feature (gamma), and a bias vector that serves as the primary bias for the layer (beta)). This allows for learned saturation of activation functions as the model learns features, while preventing random unwanted saturation.
 - A running mean and running variance over all batches analyzed during training is maintained during minibatch training. Then, at test time, these values are used instead of recomputing the mean and variance of the entire dataset.
 - BatchNorm makes each sample's activation depend on the other examples in the batch. If batches are small or unrepresentative, the noisy mean and variance can destabilize training. However, with representative minibatches this noise can actually serve as a useful reglarization feature.
+
+
+
+## Part Five: WaveNet-esque Architecture
+
+This part serves to introduce a WaveNet-Esque architecture, changing our simple MLP with a sequential hidden layers into a hierarchical stacked neural network.
+
+But what does that really mean? A hierarchical stacked neural network introduces two ideas that play off of each other:
+
+- **Stacking:** Instead of merging all of the embeddings for a given `x` (`batch[i]`), e.g. with dimensions `(batch, num_embeddings * block_size)`, we instead merge adjacent embeddings together, e.g. with dimensions `(batch, block size // 2, num_embeddings * 2)`. The idea behind this approach is to allow for nearby characters/tokens to develop the output features of the hidden layer to represent the interplay between them and their positioning. This addresses the same underlying problem as attention, but in a different manner: the manner in which information from different positions interacts differs. Unlike attention, the interaction pattern is *fixed* and *hierarchical* rather than dynamically learned between positions.
+- **Hierarchical structure:** Taking the stacking idea from above, we still must converge to a single `logits` output of size `(batch, vocab_size)`. We do this while preserving the feature discovery between local characters of stacking. This is accomplished by progressively merging the adjaceny positions along the block dimension as we move further through the net. In the implemented network this appears as `(B, 8, E) -> (B, 4, 2E) -> (B, 4, H) -> (B, 2, 2H) -> (B, 2, H) -> (B, 1, 2H) -> (B, 1, H)`. Once the block dimension is of size 1, it can be passed through the output layer as normal in order to compute the probabilities and loss.
+
+Note that this stacking function is still parallelizable through tensor multiplication, as only the most inner dimensions are used. For example, `(batch, S, E) @ (E, H)` yields `(batch, S, H)`. Stacking would then morph the tensor into `(batch, S // 2, H * 2)`, and continue the network layers.
